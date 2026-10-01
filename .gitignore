@@ -1,0 +1,6 @@
+# Built from coverprogresspocketbook.koplugin/ (see AGENTS.md, Packaging)
+*.zip
+
+# macOS metadata
+.DS_Store
+._*
