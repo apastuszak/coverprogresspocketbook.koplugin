@@ -1,8 +1,15 @@
 --[[--
 @module koplugin.coverprogresspocketbook
 
-v1.18
+v1.21
 
+v1.21: PocketBook: the power-off screen can mirror the sleep screen (cover,
+       progress bar and message) instead of showing the cover alone.
+v1.20: PocketBook: the power-off screen now works. The cover is also written,
+       in the firmware's 4-bit format, into the logo customiser's cache
+       (offlogo/pb_offlogo.bmp), which is what the power-off screen shows.
+v1.19: PocketBook: optional power-off and startup screens showing just the
+       book cover, written when a book is opened, off by default.
 v1.18: fewer flash writes on PocketBook: locking no longer forces a rewrite of
        an unchanged image, and rotating the screen no longer rewrites both.
 v1.17: a book without a cover gets its title in bold, centred on the plain
@@ -263,6 +270,32 @@ local WRITE_LANDSCAPE = Device:isPocketBook()
 -- Can be switched off in the menu (coverprogress_notify_taskmgr).
 local NOTIFY_TASKMGR = Device:isPocketBook()
 
+-- Optional extra PocketBook screens, both just the cover (no bar, no message)
+-- and both off by default. Written when a book is opened, and only when the
+-- image would differ from the last one written (another book, background or
+-- size). Never on close: KOReader's auto power-off closes the book on its way
+-- down, and a startup-logo write could then be cut off part-way.
+-- Power-off screen: when a custom power-off image is chosen in the PocketBook
+-- settings (offlogo=@user_defined in global.cfg), the firmware's logo
+-- customiser converts that source file once into OFFLOGO_CACHE_PATH, a 4-bit
+-- greyscale BMP, and shows the cache at power-off. It never rereads the
+-- source (Era Lite, firmware 6.11; see system/config/logos_customizer/
+-- logos.json). So the plugin writes both: the 24-bit cover at OFFLOGO_PATH,
+-- which the user picks as the custom image, and the same cover in the
+-- firmware's own 4-bit format straight into the cache. If the customiser ever
+-- rebuilds the cache from the source, it gets the same cover.
+local OFFLOGO_PATH = "/mnt/ext1/system/logo/offlogo/cover.bmp"
+local OFFLOGO_CACHE_PATH = "/mnt/ext1/system/logo/offlogo/pb_offlogo.bmp"
+-- The power-off screen can instead mirror the sleep screen (cover, bar and
+-- message): coverprogress_offlogo_mode "sleep". Then only the cache is
+-- written, each time the portrait lock image is, and the user picks the Line
+-- lock image as the custom source. "cover" is the cover alone, as above.
+local LINE_LOCK_PATH = "/mnt/ext1/system/resources/Line/taskmgr_lock_background.bmp"
+-- Startup screen: `iv2sh WriteStartupLogo` copies a BMP into the boot logo
+-- area of flash, as the stock coverimage plugin does. This is the working
+-- file it is copied from, in KOReader's data folder.
+local STARTUP_LOGO_FILE = "coverprogress_startup.bmp"
+
 -- Writes made while the device is going to sleep must not send that event.
 -- Sending it at that moment left the front light off after waking, and could
 -- stop the device waking from a double-click lock (Era Lite, v1.14; fixed by
@@ -421,6 +454,54 @@ end
 -- plugin wrote itself is never mistaken for the original. The path is only
 -- marked checked once that is settled, and false is returned if an existing
 -- file could not be copied, so the caller does not overwrite it.
+-- Writes bb as a 4-bit greyscale BMP in the layout the PocketBook logo
+-- customiser produces: 40-byte header, 16-entry palette from black (index 0)
+-- to white (index 15) in steps of 17, bottom-up rows padded to 4 bytes, and
+-- the image-size, resolution and colour-count fields left at 0. KOReader's
+-- own BMP writer only does 8 and 24 bits. Returns true on success.
+local function writeBMP4(bb, path)
+    local ffi = require("ffi")
+    local w, h = bb:getWidth(), bb:getHeight()
+    local row_bytes = math.ceil(w / 2)
+    row_bytes = row_bytes + (4 - row_bytes % 4) % 4
+    local data_size = row_bytes * h
+    local pixel_offset = 14 + 40 + 16 * 4
+
+    local function le16(n) return string.char(n % 256, math.floor(n / 256) % 256) end
+    local function le32(n)
+        return string.char(n % 256, math.floor(n / 256) % 256,
+                           math.floor(n / 65536) % 256, math.floor(n / 16777216) % 256)
+    end
+    local parts = {
+        "BM", le32(pixel_offset + data_size), le16(0), le16(0), le32(pixel_offset),
+        le32(40), le32(w), le32(h), le16(1), le16(4), le32(0),
+        le32(0), le32(0), le32(0), le32(0), le32(0),
+    }
+    for i = 0, 15 do
+        local v = i * 17
+        parts[#parts + 1] = string.char(v, v, v, 0)
+    end
+
+    -- Grey 0..255 to palette index 0..15, rounding to the nearest shade.
+    local function nibble(x, y)
+        if x >= w then return 15 end  -- row padding: white
+        return math.floor(bb:getPixel(x, y):getColor8().a / 17 + 0.5)
+    end
+    local buf = ffi.new("uint8_t[?]", data_size)  -- zero-filled
+    for y = 0, h - 1 do
+        local row = (h - 1 - y) * row_bytes  -- bottom-up
+        for x = 0, w - 1, 2 do
+            buf[row + x / 2] = nibble(x, y) * 16 + nibble(x + 1, y)
+        end
+    end
+
+    local f = io.open(path, "wb")
+    if not f then return false end
+    local ok = f:write(table.concat(parts)) and f:write(ffi.string(buf, data_size))
+    f:close()
+    return ok and true or false
+end
+
 local function backupOriginal(path)
     local checked = G_reader_settings:readSetting("coverprogress_backup_checked", {})
     if checked[path] then return true end
@@ -515,6 +596,9 @@ function CoverProgress:init()
     if self.mode == "kobo" then self.mode = "none" end
     self.show_page = G_reader_settings:isTrue("coverprogress_show_page")
     self.notify_taskmgr = NOTIFY_TASKMGR and G_reader_settings:nilOrTrue("coverprogress_notify_taskmgr")
+    self.offlogo = Device:isPocketBook() and G_reader_settings:isTrue("coverprogress_offlogo")
+    self.offlogo_mode = G_reader_settings:readSetting("coverprogress_offlogo_mode", "cover")
+    self.startup_logo = Device:isPocketBook() and G_reader_settings:isTrue("coverprogress_startup_logo")
 
     self.bases = nil
 
@@ -663,7 +747,10 @@ end
 
 -- Scales the cover onto a background of the target size. Takes ownership of
 -- cover_bb. Returns the base buffer and the rectangle the cover occupies.
-function CoverProgress:placeCover(cover_bb, landscape)
+-- With plain set, the cover is fitted to the whole screen (no room reserved for
+-- a bar) and the auto background is not re-decided: used for the power-off and
+-- startup images, which are the cover alone.
+function CoverProgress:placeCover(cover_bb, landscape, plain)
     local t_w, t_h = self:getTargetSize(landscape)
 
     -- "below" reserves the band before scaling, so the cover can never
@@ -674,7 +761,7 @@ function CoverProgress:placeCover(cover_bb, landscape)
     -- "margin" scales to the full height and leaves the cover centred, letting
     -- the band fall into the letterbox a tall screen already produces.
     local avail_h = t_h
-    if self.mode == "below" then
+    if self.mode == "below" and not plain then
         avail_h = t_h - self:getBandHeight(t_h)
     end
 
@@ -685,7 +772,7 @@ function CoverProgress:placeCover(cover_bb, landscape)
     -- NOTE: scaleBlitBuffer frees the source. Do not free cover_bb after this.
     cover_bb = RenderImage:scaleBlitBuffer(cover_bb, s_w, s_h)
 
-    if self.background == "auto" and not landscape then
+    if self.background == "auto" and not landscape and not plain then
         self.auto_choice = self:decideAutoBackground(cover_bb, s_w, s_h)
     end
 
@@ -718,10 +805,10 @@ end
 -- in bold, centred in the space the cover would use. Same return values as
 -- placeCover. Built as 24-bit colour, because the BMP writer keeps the
 -- buffer's depth and the PocketBook lock screen expects 24-bit.
-function CoverProgress:placeTitle(landscape)
+function CoverProgress:placeTitle(landscape, plain)
     local t_w, t_h = self:getTargetSize(landscape)
     local avail_h = t_h
-    if self.mode == "below" then
+    if self.mode == "below" and not plain then
         avail_h = t_h - self:getBandHeight(t_h)
     end
 
@@ -1122,7 +1209,7 @@ function CoverProgress:render(force, reason)
     self.write_report = {}
     for _, base in ipairs(self.bases) do
         self.cover_rect = base.rect
-        local ok, detail = self:writeImage(base.bb, base.path, pct, message)
+        local ok, detail = self:writeImage(base.bb, base.path, pct, message, base.landscape)
         table.insert(self.write_report, { path = base.path, ok = ok, reason = detail })
         if not ok then
             all_ok = false
@@ -1145,7 +1232,7 @@ end
 
 -- Draws the progress onto a copy of base_bb and publishes it at path.
 -- Returns true and the image size, or false and the reason it failed.
-function CoverProgress:writeImage(base_bb, path, pct, message)
+function CoverProgress:writeImage(base_bb, path, pct, message, landscape)
     local t_w, t_h = base_bb:getWidth(), base_bb:getHeight()
 
     -- Fresh copy each time; drawing onto the base would stack overlays.
@@ -1163,6 +1250,27 @@ function CoverProgress:writeImage(base_bb, path, pct, message)
         self:drawMessage(out, message)
     end
 
+    -- Power-off screen mirroring the sleep screen: the same portrait image,
+    -- in the firmware's 4-bit format, into the power-off cache. A plain file
+    -- write, so it is safe on every trigger, including going to sleep.
+    if self.offlogo and self.offlogo_mode == "sleep" and not landscape then
+        local copy = Blitbuffer.new(out:getWidth(), out:getHeight(), out:getType())
+        copy:blitFrom(out, 0, 0, 0, 0, out:getWidth(), out:getHeight())
+        if not self:publishImage(copy, OFFLOGO_CACHE_PATH, writeBMP4) then
+            logger.warn("CoverProgress: could not update the power-off screen")
+        end
+    end
+
+    return self:publishImage(out, path)
+end
+
+-- Saves out at path safely: written to <path>.tmp, checked, the existing file
+-- backed up once (see backupOriginal), then renamed into place. Frees out.
+-- write_fn, if given, writes the file instead of KOReader's writer (used for
+-- the 4-bit power-off cache). Returns true and the image size, or false and
+-- the reason it failed.
+function CoverProgress:publishImage(out, path, write_fn)
+    local t_w, t_h = out:getWidth(), out:getHeight()
     local fmt = getExtension(path)
     if fmt ~= "jpg" and fmt ~= "jpeg" and fmt ~= "png" and fmt ~= "bmp" then
         fmt = "jpg"
@@ -1184,7 +1292,12 @@ function CoverProgress:writeImage(base_bb, path, pct, message)
     end
 
     local tmp = path .. ".tmp"
-    local ok = out:writeToFile(tmp, fmt, JPEG_QUALITY, GRAYSCALE)
+    local ok
+    if write_fn then
+        ok = write_fn(out, tmp)
+    else
+        ok = out:writeToFile(tmp, fmt, JPEG_QUALITY, GRAYSCALE)
+    end
     out:free()
 
     if not ok then
@@ -1287,12 +1400,84 @@ function CoverProgress:rebuild()
 end
 
 ------------------------------------------------------------------------------
+-- Power-off and startup screens (PocketBook, optional)
+------------------------------------------------------------------------------
+
+-- What the cover-only image depends on. Unchanged means nothing to rewrite.
+function CoverProgress:logoKey()
+    local w, h = self:getTargetSize(false)
+    local file = self.ui.document and self.ui.document.file or ""
+    return table.concat({ file, self:resolvedBackground(), w .. "x" .. h }, "|")
+end
+
+-- The cover alone, fitted to the portrait screen, or the title if there is no
+-- cover. The caller frees it.
+function CoverProgress:buildPlainImage()
+    local cover_bb = FileManagerBookInfo:getCoverImage(self.ui.document)
+    if cover_bb then
+        return (self:placeCover(cover_bb, false, true))
+    end
+    return (self:placeTitle(false, true))
+end
+
+-- Writes the power-off and/or startup image if switched on and out of date.
+-- Called after a book opens and when either switch is turned on; never from
+-- the sleep or close paths (see OFFLOGO_PATH).
+function CoverProgress:writeLogos()
+    if not (self.enabled and (self.offlogo or self.startup_logo)) then return end
+    local key = self:logoKey()
+    local want_off = self.offlogo and self.offlogo_mode == "cover"
+        and G_reader_settings:readSetting("coverprogress_offlogo_key") ~= key
+    local want_start = self.startup_logo
+        and G_reader_settings:readSetting("coverprogress_startup_key") ~= key
+    if not (want_off or want_start) then return end
+
+    local plain = self:buildPlainImage()
+    local ok, err = pcall(function()
+        if want_off then
+            local copy = Blitbuffer.new(plain:getWidth(), plain:getHeight(), plain:getType())
+            copy:blitFrom(plain, 0, 0, 0, 0, plain:getWidth(), plain:getHeight())
+            local cache = Blitbuffer.new(plain:getWidth(), plain:getHeight(), plain:getType())
+            cache:blitFrom(plain, 0, 0, 0, 0, plain:getWidth(), plain:getHeight())
+            local source_ok = self:publishImage(copy, OFFLOGO_PATH)
+            local cache_ok = self:publishImage(cache, OFFLOGO_CACHE_PATH, writeBMP4)
+            if source_ok and cache_ok then
+                G_reader_settings:saveSetting("coverprogress_offlogo_key", key)
+                logger.info("CoverProgress: power-off screen updated")
+            end
+        end
+        if want_start then
+            local path = DataStorage:getFullDataDir() .. "/" .. STARTUP_LOGO_FILE
+            local copy = Blitbuffer.new(plain:getWidth(), plain:getHeight(), plain:getType())
+            copy:blitFrom(plain, 0, 0, 0, 0, plain:getWidth(), plain:getHeight())
+            if self:publishImage(copy, path) then
+                -- iv2sh is slow, so it runs in the background, as in the stock
+                -- coverimage plugin. The path is quoted with util.shell_escape.
+                os.execute("sync")
+                os.execute("/ebrmain/bin/iv2sh WriteStartupLogo "
+                    .. util.shell_escape({ path }) .. " >/dev/null 2>&1 &")
+                G_reader_settings:saveSetting("coverprogress_startup_key", key)
+                logger.info("CoverProgress: startup screen update started")
+            end
+        end
+    end)
+    plain:free()
+    if not ok then
+        logger.warn("CoverProgress: power-off/startup screen failed:", err)
+    end
+end
+
+------------------------------------------------------------------------------
 -- Events
 ------------------------------------------------------------------------------
 
 function CoverProgress:onReaderReady()
     self.closing = false
     self:rebuild()
+    local ok, err = pcall(self.writeLogos, self)
+    if not ok then
+        logger.warn("CoverProgress: writeLogos failed:", err)
+    end
 end
 
 function CoverProgress:onPageUpdate()
@@ -1639,6 +1824,70 @@ function CoverProgress:addToMainMenu(menu_items)
             },
         },
     }
+    if Device:isPocketBook() then
+        -- PocketBook only; placed before "Update now", the last entry.
+        local items = menu_items.coverprogress.sub_item_table
+        local function logoSwitch(field, key, label, help)
+            return {
+                text = label,
+                help_text = help,
+                checked_func = function()
+                    return self[field]
+                end,
+                callback = function()
+                    self[field] = not self[field]
+                    G_reader_settings:saveSetting(key, self[field])
+                    if self[field] then
+                        self:writeLogos()
+                    end
+                end,
+            }
+        end
+        -- Power-off screen: Off / Book cover only / Same as sleep screen.
+        local function offChoice(on, mode, label, help)
+            return {
+                text = label,
+                help_text = help,
+                radio = true,
+                checked_func = function()
+                    if not on then return not self.offlogo end
+                    return self.offlogo and self.offlogo_mode == mode
+                end,
+                callback = function()
+                    self.offlogo = on
+                    G_reader_settings:saveSetting("coverprogress_offlogo", on)
+                    if not on then return end
+                    self.offlogo_mode = mode
+                    G_reader_settings:saveSetting("coverprogress_offlogo_mode", mode)
+                    if mode == "cover" then
+                        -- Write the cover now, even for the book already shown.
+                        G_reader_settings:delSetting("coverprogress_offlogo_key")
+                        self:writeLogos()
+                    else
+                        self:renderNow(true, "menu")
+                    end
+                end,
+            }
+        end
+        table.insert(items, #items, {
+            text_func = function()
+                if not self.offlogo then return _("Power-off screen: unchanged") end
+                if self.offlogo_mode == "sleep" then return _("Power-off screen: same as sleep screen") end
+                return _("Power-off screen: book cover")
+            end,
+            sub_item_table = {
+                offChoice(false, nil, _("Off"),
+                    _("The plugin leaves the power-off screen alone.")),
+                offChoice(true, "cover", _("Book cover only"),
+                    T(_("The cover alone, with no bar or text, updated when a different book is opened. In the PocketBook settings, set the power-off logo to Custom image and choose %1. Turn off the built-in Cover image plugin, which writes the same file."), OFFLOGO_PATH)),
+                offChoice(true, "sleep", _("Same as sleep screen"),
+                    T(_("The same image as the sleep screen, with the progress bar and message, updated whenever the sleep screen is. In the PocketBook settings, set the power-off logo to Custom image and choose %1."), LINE_LOCK_PATH)),
+            },
+        })
+        table.insert(items, #items, logoSwitch("startup_logo", "coverprogress_startup_logo",
+            _("Startup screen: book cover"),
+            _("Sets the cover alone, with no bar or text, as the screen shown while the device starts. Written when a different book is opened, not on every page, because it is stored in the device's flash memory. Turn off the built-in Cover image plugin, which also sets it.")))
+    end
     if NOTIFY_TASKMGR then
         -- PocketBook only; placed before "Update now", the last entry.
         local items = menu_items.coverprogress.sub_item_table

@@ -144,6 +144,26 @@ There are no tests in the repo (see Testing).
   https://www.mobileread.com/forums/showthread.php?t=359223, where nobody had a fix. The diagnostic
   scripts used to find this are in `tools/` (`pbinfo.sh`, `pbprobe.sh`, `pbtest.sh`); run them from
   KOReader's file browser (long-press, Execute shell script).
+- **Power-off and startup screens (optional, off by default):** `writeLogos()` writes the cover alone
+  (`buildPlainImage()`: `placeCover`/`placeTitle` with `plain`, no band reservation, no auto
+  re-decision) to `OFFLOGO_PATH` (`/mnt/ext1/system/logo/offlogo/cover.bmp`, 24-bit; the user picks
+  it as the Custom image power-off logo) and to `OFFLOGO_CACHE_PATH` (`offlogo/pb_offlogo.bmp`), the
+  logo customiser's cache that the power-off screen actually shows. The customiser converts the
+  chosen source into that cache once, on selection (`system/config/logos_customizer/logos.json`
+  records `cachePath`, `sourcePath`, `sourceHash`; `global.cfg` has `offlogo=@user_defined`), and
+  never rereads the source. The cache is 4-bit: `writeBMP4()` reproduces the firmware's file byte
+  for byte in the header and palette (16 greys, index 0 black to 15 white, bottom-up rows, size,
+  resolution and colour fields 0; 1,061,878 bytes at 1264×1680). The "Book Cover" option shows the
+  default image with KOReader. `coverprogress_offlogo_mode` "sleep" instead mirrors the sleep
+  screen: `writeImage()` also writes the portrait composited image into the cache on every lock-image
+  write (a plain file write, so allowed on the sleep path too), and `writeLogos()` skips the
+  power-off part; the user picks the Line lock image as the custom source. and/or to `<full data dir>/coverprogress_startup.bmp` followed by
+  `iv2sh WriteStartupLogo` in the background (path quoted with `util.shell_escape`). Only from
+  `onReaderReady` and when a switch is turned on, and only when `logoKey()` (book file, background,
+  size) differs from the saved key. Never from sleep or close: KOReader's auto power-off closes the
+  book, and a startup-logo flash write interrupted by power-off could corrupt it. Untested on the
+  device so far: whether writing the cache is enough on its own (v1.20), and whether the customiser
+  rebuilds the cache from the source at boot when `sourceHash` no longer matches.
 - **Write volume:** writes land on internal flash. Keep them throttled, and skip them when the
   signature is unchanged. Placeholders that change often (`%m` clock) cause frequent rewrites by design.
 

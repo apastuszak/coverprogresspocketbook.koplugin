@@ -86,6 +86,15 @@ The landscape file is the same size turned sideways. The same guide notes that a
 
 If either file already exists, it is copied to `<name>.bmp.orig` before the plugin first overwrites it. To go back to the stock lock screen, disable the plugin and delete both `.bmp` files. To get back a custom image you had before, rename its `.orig` file back instead.
 
+#### Power-off and startup screens
+
+Two optional settings, off by default, put the book on two more PocketBook screens. The startup screen shows the cover alone, with no progress bar or message (or the title for a book without a cover). The power-off screen can show the cover alone, or the same image as the sleep screen.
+
+- **Power-off screen** offers **Off**, **Book cover only** or **Same as sleep screen**. In the PocketBook settings, set the power-off logo to **Custom image** and choose the matching file: `system/logo/offlogo/cover.bmp` for *Book cover only*, which the plugin writes when a different book is opened, or `system/resources/Line/taskmgr_lock_background.bmp` for *Same as sleep screen*, which follows the sleep screen, progress bar and message included. The firmware converts a custom image only once, when you pick it, into its own copy (`offlogo/pb_offlogo.bmp`, a 4-bit greyscale BMP) and shows that copy at power-off; so the plugin also writes the new image straight into that copy each time. With *Same as sleep screen* that copy (about 1 MB) is rewritten whenever the sleep screen is. The **Book Cover** option does not work with KOReader.
+- **Startup screen: book cover** sets the screen shown while the device starts, using the firmware's `iv2sh WriteStartupLogo`, as KOReader's built-in Cover image plugin does. This is stored in the device's flash memory, so it is only written when a different book is opened.
+
+Both are written when a book is opened, and only when the image would change. They are never written while the device is going to sleep or when a book closes; an automatic power-off closes the book, and a startup-screen write cut off by the power going out could leave it damaged. If you use either, keep the built-in Cover image plugin turned off, since it writes the same file and startup screen.
+
 ### Bigme (HiBreak, HiBreak Pro, B-series tablets)
 
 Tested on a HiBreak Pro BW; the process is the same across Bigme's Android devices.
@@ -260,6 +269,8 @@ To keep writes, and wear on the device's storage, to a minimum, leave page numbe
 | Auto: go black above N% dark | Auto sensitivity, 10–90% |
 | Output: *path* | Shows where the image is written (both files on PocketBook) |
 | Update delay: N s | Wait after the last page turn before rewriting, 0–60 s |
+| Power-off screen | PocketBook only. *Off* (default), *Book cover only* (written when a different book is opened; pick `system/logo/offlogo/cover.bmp` as the Custom image) or *Same as sleep screen* (follows the sleep screen; pick the Line `taskmgr_lock_background.bmp`). Also written into the firmware's copy, `pb_offlogo.bmp` |
+| Startup screen: book cover | PocketBook only, off by default. Sets the cover alone as the startup screen, via `iv2sh WriteStartupLogo`, when a different book is opened |
 | Refresh sleep-cover image | PocketBook only, on by default. After each update, tells the firmware to reload the lock image, so the sleep cover and double-click locks show it |
 | Update now | Rebuilds and writes immediately |
 
@@ -281,6 +292,9 @@ Stored in `settings.reader.lua` in your KOReader settings directory. Fully exit 
 | `coverprogress_message_container` | `"box"` | `box`, `banner` |
 | `coverprogress_message_position` | `50` | 0 bottom – 100 top |
 | `coverprogress_show_page` | *(unset)* | Show page number; writes on every page turn |
+| `coverprogress_offlogo` / `coverprogress_startup_logo` | *(unset = off)* | PocketBook: write the power-off / startup screen |
+| `coverprogress_offlogo_mode` | `"cover"` | Power-off screen: `cover` (cover alone) or `sleep` (same as the sleep screen) |
+| `coverprogress_offlogo_key` / `coverprogress_startup_key` | *(set by plugin)* | What was last written, so the same book isn't written again |
 | `coverprogress_notify_taskmgr` | *(unset = on)* | PocketBook: send the lock-image reload after each update |
 | `coverprogress_backup_checked` | *(set by plugin)* | Paths already checked for a `.orig` backup. Remove an entry to back that path up again |
 
