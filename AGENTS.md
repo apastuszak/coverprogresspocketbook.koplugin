@@ -161,9 +161,10 @@ There are no tests in the repo (see Testing).
   `iv2sh WriteStartupLogo` in the background (path quoted with `util.shell_escape`). Only from
   `onReaderReady` and when a switch is turned on, and only when `logoKey()` (book file, background,
   size) differs from the saved key. Never from sleep or close: KOReader's auto power-off closes the
-  book, and a startup-logo flash write interrupted by power-off could corrupt it. Untested on the
-  device so far: whether writing the cache is enough on its own (v1.20), and whether the customiser
-  rebuilds the cache from the source at boot when `sourceHash` no longer matches.
+  book, and a startup-logo flash write interrupted by power-off could corrupt it. Confirmed on the
+  Era Lite (v1.21): the startup screen, and the power-off screen in both modes via the cache write.
+  Not known: whether the customiser ever rebuilds the cache from the source when `sourceHash` no
+  longer matches; pointing the custom image at the matching source makes that harmless.
 - **Write volume:** writes land on internal flash. Keep them throttled, and skip them when the
   signature is unchanged. Placeholders that change often (`%m` clock) cause frequent rewrites by design.
 
